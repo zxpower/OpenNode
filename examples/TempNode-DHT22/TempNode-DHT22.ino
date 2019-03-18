@@ -1,7 +1,7 @@
 // **********************************************************************************
 // OpenNode DHT22 example for OpenMiniHub IoT, Node and Contact types from mysensors.org
 // **********************************************************************************
-// Copyright Martins Ierags (2017), martins.ierags@gmail.com
+// Copyright Martins Ierags (2018), martins.ierags@gmail.com
 // http://openminihub.com/
 // **********************************************************************************
 #include <DHT.h>  
@@ -9,11 +9,11 @@
 #include <SPIFlash.h>       //get it here: https://www.github.com/lowpowerlab/spiflash
 #include <RFM69_OTA.h>
 
-#define CONFIG_MAX_CONTACTS (3)
+#define CONFIG_MAX_MESSAGES (3)
 #include <OpenNode.h>
 
 #define SW_NAME "DHT22-Light"
-#define SW_VERSION "1.3"
+#define SW_VERSION "1.5"
 
 #define HUMIDITY_SENSOR_DIGITAL_PIN 6
 #define HUMIDITY_SENSOR_POWER_PIN   5
@@ -22,7 +22,10 @@
 #define LIGHT_SENSOR_ANALOG_PIN     A1
 #define LIGHT_SENSOR_POWER_PIN      A2
 
-// Contact value getters
+#define TEMP_DEVICE_ID 1
+#define HUM_DEVICE_ID  2
+
+// Device value getters
 bool temperatureValue(unsigned char id);
 bool humidityValue(unsigned char id);
 
@@ -31,18 +34,21 @@ float lastTemp;
 float lastHIC;
 float lastHum;
 
+long prevBatteryLevel = 0;
+
 SPIFlash flash(FLASH_SS, 0xEF30); //EF30 for windbond 4mbit flash
 
 RFM69 radio;
 OpenNode node(&radio);
-NodeContact cTemperature(1, V_TEMP, temperatureValue, k1Minute);
-NodeContact cHumidity(2, V_HUM, humidityValue, k1Minute);
+NodeDevice dTemperature(TEMP_DEVICE_ID, V_TEMP, temperatureValue, k1Minute);
+NodeDevice dHumidity(HUM_DEVICE_ID, V_HUM, humidityValue, k1Minute);
 
 void readDHT()
 {
   digitalWrite(HUMIDITY_SENSOR_POWER_PIN, HIGH); // turn DHT22 sensor on
+  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
   dht.begin();
-  LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
+  sleepSeconds(2);  // 0.5 Hz sampling rate (once every 2 seconds)
   float temp = dht.readTemperature();
   if (isnan(temp)) {
       Serial.println("Failed reading temperature from DHT");
@@ -62,6 +68,8 @@ void readDHT()
   }
 
   digitalWrite(HUMIDITY_SENSOR_POWER_PIN, LOW); // turn DHT22 sensor off
+  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, OUTPUT); //turn data pin as output
+  digitalWrite(HUMIDITY_SENSOR_DIGITAL_PIN, LOW); // turn DHT22 data pin to low
 }
 
 bool temperatureValue(unsigned char id)
@@ -81,25 +89,26 @@ bool humidityValue(unsigned char id)
 void setup()
 {
   pinMode(HUMIDITY_SENSOR_POWER_PIN, OUTPUT);
-  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
+//  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
   pinMode(LIGHT_SENSOR_POWER_PIN, OUTPUT);
   pinMode(LIGHT_SENSOR_ANALOG_PIN, INPUT);
 
   Serial.begin(115200);
   Serial.println("Serial init done");
 
-  if (flash.initialize())
+  if (flash.initialize()) {
     Serial.println("SPI Flash Init OK!");
-  else
+    flash.sleep();
+  } else
     Serial.println("SPI Flash Init FAIL!");  
 
-  node.initRadio(1, false); //NodeID=1, do not read config from EEPROM
+  node.initRadio(); //NodeID=1, do not read config from EEPROM
+  
   node.sendHello(SW_NAME, SW_VERSION);
 
-  node.sendHello(SW_NAME, SW_VERSION);
-
-  node.presentContact(1, S_TEMP);
-  node.presentContact(2, S_HUM);
+  readDHT();
+  node.presentDevice(TEMP_DEVICE_ID, S_TEMP);
+  node.presentDevice(HUM_DEVICE_ID, S_HUM);
 }
 
 void loop()
@@ -110,17 +119,26 @@ void loop()
     Serial.println("Updating...");
     CheckForWirelessHEX(radio, flash);
     Serial.println("Update failed");
-    node.disableWaitForUpdate();
+//    node.disableWaitForUpdate();
   }
 
-  node.setPayload(lastTemp);
-  cTemperature.sendReport(99, true, false);
+//  node.setPayload(lastTemp);
+//  dTemperature.sendReport(99, true, false);
 
+  //check battery
+  long batteryLevel = 100 - (3329-readVcc());
+  if (prevBatteryLevel != batteryLevel)
+  {
+    char str_temp[4];
+    dtostrf(batteryLevel, 1, 0, str_temp);
+    if (node.sendInternalMessage(I_BATTERY_LEVEL, str_temp)) prevBatteryLevel = batteryLevel;
+  }
   sleepSeconds(sleepTime);
 }
 
 void sleepSeconds(unsigned long sleepTime)
 {
+  radio.sleep();
   unsigned long cycleCount = sleepTime / 8;
   byte remainder = sleepTime % 10;
   for(unsigned int i=0; i<cycleCount; i++)
@@ -131,4 +149,17 @@ void sleepSeconds(unsigned long sleepTime)
     LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF);
   if (bitRead(remainder,0) > 0)
     LowPower.powerDown(SLEEP_1S, ADC_OFF, BOD_OFF);
+}
+
+long readVcc() {
+  long result;
+  // Read 1.1V reference against AVcc
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Convert
+  while (bit_is_set(ADCSRA,ADSC));
+  result = ADCL;
+  result |= ADCH<<8;
+  result = 1125300L / result; // Back-calculate AVcc in mV
+  return result;
 }

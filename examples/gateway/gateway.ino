@@ -7,18 +7,17 @@
 // **********************************************************************************
 #include <RFM69_OTA.h>      //get it here: https://github.com/lowpowerlab/RFM69
 
-#define CONFIG_MAX_CONTACTS (0)
+#define CONFIG_MAX_MESSAGES (0)
 #define IS_GATEWAY (TRUE)
 #include <OpenNode.h>
 
 #define SERIAL_BAUD   115200
-
-#define SW_NAME "OpenMiniHub Gateway"
-#define SW_VERSION "2.0"
-
 #define TIMEOUT     3000
 #define ACK_TIME    50    // # of ms to wait for an ack
 #define DEBUG_MODE false  //set 'true' to see verbose output from programming sequence
+
+#define SW_NAME "OpenMiniHub Gateway"
+#define SW_VERSION "2.0"
 
 
 RFM69 radio;
@@ -30,16 +29,16 @@ void setup() {
   Serial.begin(115200);
 
   node.initRadio(0);  //NodeID=0 (gateway)
+//  radio.setHighPower(); //must include this only for RFM69HW/HCW!
 
-  bprintf("\n");
-  bprintf("0;255;3;0;14;%s\n", SW_NAME);
-  bprintf("0;255;3;0;12;%s\n", SW_VERSION);
+//  bprintf("\n");
+//  bprintf("0;255;3;0;14;%s\n", SW_NAME);
+//  bprintf("0;255;3;0;12;%s\n", SW_VERSION);
 }
 
 
 void processSerial()
 {
-  blink(20);
   byte inputLen = 0;
   char inData[65]; // Allocate some space for the string 64+end
   byte payload[65];
@@ -49,6 +48,7 @@ void processSerial()
   Serial.setTimeout(0);
   String inputstr=String(inData);
   if (inputLen > 0) {
+    blink(5);
     // wireless update part
     if (inputLen==4 && inData[0]=='F' && inData[1]=='L' && inData[2]=='X' && inData[3]=='?') {
       if (targetID==0)
@@ -88,9 +88,7 @@ void processSerial()
       char encryptKey[16];
       for (uint8_t i = 0; i < 16; i++) {
         encryptKey[i]=inData[2+i];
-//        Serial.print((char)encryptKey[i]);
       }
-//      Serial.println();
       node.updateKey(encryptKey);
       node.saveRadioConfig();
       radio.encrypt(encryptKey);
@@ -104,14 +102,14 @@ void processSerial()
       Serial.println((unsigned char)updateNode);
       node.enableUpdate(updateNode);
     } else if (colonIndex>0) {
-      node.sendMessage(inData);
+      bool sendStatus = node.sendMessage(inData);
     }
   }
 }
 void outputSerial(mPayload *msg)
 {
     Serial.print((unsigned char)msg->senderNode);  Serial.print(";");
-    Serial.print((unsigned char)msg->contactId);   Serial.print(";");
+    Serial.print((unsigned char)msg->deviceId);   Serial.print(";");
     Serial.print((unsigned char)msg->messageType); Serial.print(";");
     Serial.print((unsigned char)msg->isAck);       Serial.print(";");
     Serial.print((unsigned char)msg->valueType);   Serial.print(";");
@@ -124,6 +122,9 @@ void outputSerial(mPayload *msg)
 
 void loop()
 {
+  if (Serial.available())
+    processSerial();
+  
   if (radio.receiveDone()) {
     PayloadData_t receivedMsg = node.dumpPayload(&msg);
     if (radio.ACK_REQUESTED) {
@@ -138,14 +139,9 @@ void loop()
         radio.sendACK();
     }
     if (receivedMsg == P_VALID) {
+      blink(5);
       outputSerial(&msg);
-      blink(20);
     }
   }
-  if (Serial.available())
-    processSerial();
-
-  node.run();
+//  node.run();
 }
-
-

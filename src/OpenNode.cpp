@@ -20,8 +20,8 @@
 // **********************************************************************************
 // #include <RFM69.h>
 #include "OpenNode.h"
-#include "NodeContact.h"
-#include "NodeType.h"
+#include "NodeDevice.h"
+#include "DeviceType.h"
 #include <RFM69registers.h>
 
 #define PRINTF_BUF_LEN  (40)
@@ -57,7 +57,7 @@ OpenNode::OpenNode(RFM69 *radio, unsigned char button, unsigned char gateway)
   gOpenNode = this;
   mRadio = radio;
   mGateway = gateway;
-  mNumContacts = 0;
+  mNumDevices = 0;
   mIsIncludeMode = false;
   mWaitForUpdate = false;
   mButton = button;
@@ -73,10 +73,10 @@ OpenNode::OpenNode(RFM69 *radio, unsigned char button, unsigned char gateway)
   pinMode(mButton, INPUT);
 }
 
-bool OpenNode::addContact(NodeContact *contact)
+bool OpenNode::addDevice(NodeDevice *device)
 {
-  if (mNumContacts <= CONFIG_MAX_CONTACTS) {
-    mContacts[mNumContacts++] = contact;
+  if (mNumDevices <= CONFIG_MAX_MESSAGES) {
+    mDevices[mNumDevices++] = device;
   }
 }
 
@@ -96,51 +96,52 @@ unsigned long OpenNode::run()
     //   }
     // }
   // }
+  // for (unsigned char i=0; i<mNumDevices; i++) {
+  //   // if (mDevices[i]->isEnqueued()) {
+  //     // mDevices[i]->sendReport();
+  //   // } else {
+  //   {
+  //     unsigned long interval = mDevices[i]->nextTickInterval();
+  //     if (interval > 0 && interval < sleepInterval) {
+  //       sleepInterval = interval;
+  //     }
+  //   }
+  // }
   unsigned long sleepInterval = 0xffffffff;
-  for (unsigned char i=0; i<mNumContacts; i++) {
-    if (mContacts[i]->isEnqueued()) {
-      mContacts[i]->sendReport();
-    } else {
-      unsigned long interval = mContacts[i]->nextTickInterval();
-      if (interval > 0 && interval < sleepInterval) {
-        sleepInterval = interval;
-      }
+  for (unsigned char i=0; i<mNumDevices; i++) {
+    if (mDevices[i]->nextTickInterval() > 0 && mDevices[i]->nextTickInterval() < sleepInterval) {
+      sleepInterval = mDevices[i]->nextTickInterval();
     }
   }
-  for (unsigned char i=0; i<mNumContacts; i++) {
-    mContacts[i]->intervalTick(sleepInterval);
+  for (unsigned char i=0; i<mNumDevices; i++) {
+    mDevices[i]->intervalTick(sleepInterval);
   }
   return sleepInterval;
 }
 
 void OpenNode::initRadio(unsigned char nodeID, bool readFromEEPROM, bool updateConfig)
 {
-  unsigned char isRFM69 = readConfig(EEPROM_IS_RFM69HW);
-  if ((isRFM69 == RF_OCP_OFF || isRFM69 == RF_OCP_ON) && readFromEEPROM) {
-    Serial.println("Config exists. Reading...");
+  unsigned char mIsRFM69HW = readConfig(EEPROM_IS_RFM69HW);
+  if ((mIsRFM69HW == RF_OCP_OFF || mIsRFM69HW == RF_OCP_ON) && readFromEEPROM) {
+    Serial.println("Reading NODE Config");
     mNetworkID = readConfig(EEPROM_NETWORK_ID);
     mFrequency = readConfig(EEPROM_FREQUENCY);
     mNodeID = readConfig(EEPROM_NODE_ID);
     readConfigBlock(&mEncryptKey, EEPROM_ENCRYPTKEY, 16);
-
-    this->getRadio()->initialize(mFrequency, mNodeID, mNetworkID);
-    this->getRadio()->encrypt(mEncryptKey);
-
-    // isRFM69='X';
-    // writeConfig(EEPROM_IS_RFM69HW, isRFM69);
   } else {
-    Serial.println("Default Config.");
-    this->getRadio()->initialize(FREQUENCY, nodeID, NETWORKID);
-    this->getRadio()->encrypt(ENCRYPTKEY);
+    Serial.println("Custom NODE Config");
+    mNetworkID = NETWORKID;
+    mFrequency = FREQUENCY;
+    mNodeID = nodeID;
+    updateKey(ENCRYPTKEY);
+  } 
+  this->getRadio()->initialize(mFrequency, mNodeID, mNetworkID);
+  this->getRadio()->encrypt(mEncryptKey);
+  if (mIsRFM69HW == RF_OCP_OFF) this->getRadio()->setHighPower();
 
-    if (updateConfig) {
-      Serial.println("Saving...");
-      mNodeID = nodeID;
-      mFrequency = FREQUENCY;
-      mNetworkID = NETWORKID;
-      updateKey(ENCRYPTKEY);
+  if (updateConfig  && !readFromEEPROM) {
+      Serial.println("Saving NODE Config");
       saveRadioConfig();
-    }
   }
   this->getRadio()->sleep();
 }
@@ -249,9 +250,10 @@ unsigned char OpenNode::newNodeID()
 
 bool OpenNode::send(unsigned char destination, bool signedMsg)
 {
+  unsigned char retries=3;
   if (signedMsg) { //Request sing nonce
     bool waitMsg = true;
-    unsigned char retries=3;
+    // unsigned char retries=3;
     for (unsigned char attempt = 0; attempt < retries; attempt++) {
       // Serial.print("->SIGNED MSG [1]: SENDIG NONCE REQUEST ["); Serial.print(attempt+1); Serial.println("]");
       OpenProtocol::buildNonceRequestPacket();
@@ -280,20 +282,22 @@ bool OpenNode::send(unsigned char destination, bool signedMsg)
       return false;
     }
   }
-  bool success = this->getRadio()->sendWithRetry(destination, (const void*) OpenProtocol::packetData(), OpenProtocol::packetLength());
+  bool success = this->getRadio()->sendWithRetry(destination, (const void*) OpenProtocol::packetData(), OpenProtocol::packetLength(), signedMsg ? retries : retries+2);
   //Does ACK has some message?
   if (success) {
     // noInterrupts();  // ? prevent loss of data while copying
     if (this->getRadio()->DATALEN) {
       if (this->getRadio()->DATA[0] == 'U') {
         mWaitForUpdate = true;
-        Serial.println("GOT: U");
+        // Serial.println("GOT: U");
       }
     }
     // interrupts();
   }
-  this->getRadio()->sleep();
-  blink(100);
+  if (mNodeID != mGateway) {
+    this->getRadio()->sleep();
+    // blink(100);
+  }
   return success;
 }
 
@@ -314,24 +318,24 @@ bool OpenNode::sendHello(const char *name, const char *version)
   return success;
 }
 
-bool OpenNode::sendInternalMessage(ContactInternal_t contactInternal, const char *message)
+bool OpenNode::sendInternalMessage(DeviceInternal_t deviceInternal, const char *message)
 {
-  OpenProtocol::buildInternalPacket(contactInternal, message);
+  OpenProtocol::buildInternalPacket(deviceInternal, message);
   return this->send(mGateway, false);
 }
 
-bool OpenNode::sendAllContactReport()
+bool OpenNode::sendAllDeviceReport()
 {
   this->setPayload("\0"); //no need to send data. We are sending only message type
-  for(unsigned char j=0; j<mNumContacts; j++) {
-    mContacts[j]->sendReport(0, false, false);
+  for(unsigned char j=0; j<mNumDevices; j++) {
+    mDevices[j]->sendReport(0, false, false);
   }
   return true;
 }
 
-bool OpenNode::sendPayload(unsigned char contactId, ContactData_t contactData, bool signedMsg)
+bool OpenNode::sendPayload(unsigned char deviceId, DeviceData_t deviceData, bool signedMsg)
 {
-  OpenProtocol::buildValuePacket(contactId, contactData);
+  OpenProtocol::buildValuePacket(deviceId, deviceData);
   return this->send(mGateway, signedMsg);
 }
 
@@ -370,10 +374,17 @@ void OpenNode::signPayload(const char* input)
   OpenProtocol::signPayload(input);
 }
 
-void OpenNode::presentContact(unsigned char contactId, ContactType_t contactType)
+void OpenNode::presentDevice(unsigned char deviceId, DeviceType_t deviceType)
 {
-  OpenProtocol::buildPresentPacket(contactId, contactType);
+  OpenProtocol::buildPresentPacket(deviceId, deviceType);
   bool success = this->send(mGateway, false);
+
+  for (unsigned char i=0; i<mNumDevices; i++) {
+    if (mDevices[i]->id() == deviceId) {
+      mDevices[i]->refreshValue();
+      mDevices[i]->sendReport(0, false, false);
+    }
+  }
 }
 
 // PayloadData_t OpenNode::dumpPayload(int src_node, int dst_node, int rssi, bool ack, unsigned char* payload, int payload_size, mPayload *msg)
@@ -399,7 +410,7 @@ PayloadData_t OpenNode::dumpPayload(mPayload *msg)
     // Serial.println(this->getRadio()->RSSI);
 
     unsigned long validTime;
-    if (payload[kContactId] == 0xff && payload[kPacketType] == C_INTERNAL && payload[kPacketSubType] == I_NONCE_REQUEST) {
+    if (payload[kDeviceId] == 0xff && payload[kPacketType] == C_INTERNAL && payload[kPacketSubType] == I_NONCE_REQUEST) {
       // Serial.println("<-SIGN [1]: GOT NONCE REQUEST");
       validTime = millis();
       // Serial.print("->SIGN [2]: SIGN="); Serial.println(validTime);
@@ -410,7 +421,7 @@ PayloadData_t OpenNode::dumpPayload(mPayload *msg)
       return P_NONCE_REQUEST;
     }
 // #ifdef IS_GATEWAY
-    if (mIsIncludeMode && payload[kContactId] == 0xff && payload[kPacketType] == C_INTERNAL && payload[kPacketSubType] == I_ID_REQUEST) {
+    if (mIsIncludeMode && payload[kDeviceId] == 0xff && payload[kPacketType] == C_INTERNAL && payload[kPacketSubType] == I_ID_REQUEST) {
       Serial.println("Sending network data");
       OpenProtocol::buildIdPacket(this);
       this->getRadio()->setPowerLevel(0);
@@ -426,7 +437,7 @@ PayloadData_t OpenNode::dumpPayload(mPayload *msg)
     }
 // #endif
     msg->senderNode = src_node;
-    msg->contactId = payload[kContactId];
+    msg->deviceId = payload[kDeviceId];
     msg->messageType = payload[kPacketType];
     // msg->isAck = ack;
     msg->valueType = payload[kPacketSubType];
@@ -437,7 +448,7 @@ PayloadData_t OpenNode::dumpPayload(mPayload *msg)
     if (payload[kPacketSubType] == I_NONCE_RESPONSE) {
       // Serial.print("["); Serial.print((unsigned char)payload_size);  Serial.print("]");
       // Serial.print((unsigned char)msg->senderNode);  Serial.print(";");
-      // Serial.print((unsigned char)msg->contactId);   Serial.print(";");
+      // Serial.print((unsigned char)msg->deviceId);   Serial.print(";");
       // Serial.print((unsigned char)msg->messageType); Serial.print(";");
       // Serial.print((unsigned char)msg->isAck);       Serial.print(";");
       // Serial.print((unsigned char)msg->valueType);   Serial.print(";");
@@ -535,9 +546,9 @@ PayloadData_t OpenNode::waitForMessage(mPayload *msg)
   */
 }
 
-// bool OpenNode::sendContactReport(unsigned char contactId, ContactData_t contactData, unsigned char destination)
+// bool OpenNode::sendDeviceReport(unsigned char deviceId, DeviceData_t deviceData, unsigned char destination)
 // {
-  // OpenProtocol::buildValuePacket(contactId, contactData);
+  // OpenProtocol::buildValuePacket(deviceId, deviceData);
 //   bool success = this->getRadio()->sendWithRetry(destination, (const void*) OpenProtocol::packetData(), OpenProtocol::packetLength());
 //   this->getRadio()->sleep();
 //   return success;
